@@ -1,0 +1,295 @@
+name: Basic API call (JavaScript)
+description: Performs a basic Excel API call using plain JavaScript & Promises.
+host: EXCEL
+api_set: {}
+script:
+  content: >-
+    $("#run").on("click", () => tryCatch(run));
+
+
+    async function run() {
+      await Excel.run(async (context) => {
+        generateConsumption(context);
+      });
+    }
+
+
+    async function generateConsumption(context) {
+      let expectMonthlyConsumptionRange = context.workbook.names.getItem("test").getRange();
+      expectMonthlyConsumptionRange.load("values");
+      expectMonthlyConsumptionRange.load("columnCount");
+      expectMonthlyConsumptionRange.load("rowCount");
+
+      let lastGeneratedRange = context.workbook.names.getItem("LAST_COMSUMTION_GENERATED").getRange();
+      lastGeneratedRange.load("values");
+
+      // Sync to get the range values
+      await context.sync();
+
+      let nowDate = new Date();
+      let numOfRows = expectMonthlyConsumptionRange.rowCount;
+      let nowDateTZ = convertTZ(nowDate);
+
+      let formatNowYearMonth = formatDate(nowDateTZ, "yyyyMM");
+      var lastGeDate = new Date(lastGeneratedRange.values[0][0]);
+
+      let lastGenDateTZ = convertTZ(lastGeDate);
+
+      let formatLastGenYearMonth = formatDate(lastGenDateTZ, "yyyyMM");
+
+      let monthRange = monthDiff(lastGenDateTZ, nowDate);
+      //console.log("Month Range: " + monthRange);
+
+      let startOfMonth = convertTZ(formatDate(lastGenDateTZ, "yyyy-MM-01 00:00"));
+      console.log("startOfMonth: " + startOfMonth);
+      let startMonthColIndex = 5;
+
+      let numOfColumns = expectMonthlyConsumptionRange.columnCount;
+
+      for (let monthColIndex = 5; monthColIndex <= numOfColumns; monthColIndex++) {
+        let monthData = new Date(expectMonthlyConsumptionRange.values[0][monthColIndex]);
+        console.log("expectMonthlyConsumptionRange: " + expectMonthlyConsumptionRange.values[0][monthColIndex])
+        //console.log("Month data: " + monthData);
+        let monthTZ = convertTZ(monthData);
+        let headerMonth = formatDate(monthTZ, "yyyyMM");
+        if (headerMonth == formatDate(lastGenDateTZ, "yyyyMM")) {
+          startMonthColIndex = monthColIndex;
+          //console.log("StartMonthColIndex: " + startMonthColIndex);
+          break;
+        }
+      }
+
+      let consumptions = [];
+      for (let monthIndex = 0; monthIndex <= monthRange; monthIndex++) {
+        let monthColIndex = startMonthColIndex + monthIndex;
+
+        let processMonth = new Date(startOfMonth.getFullYear(), (startOfMonth.getMonth() + monthIndex));
+        console.log("PROCESS MONTH: " + processMonth);
+        
+
+        for (let contractNumberRowIndex = 1; contractNumberRowIndex < numOfRows; contractNumberRowIndex++) {
+          let contractAccount = expectMonthlyConsumptionRange.values[contractNumberRowIndex][0];
+          if (!contractAccount){
+            //console.log("PROCESS MONTH in contractAccount out: " + processMonth);
+            continue;
+          }
+
+          let deviceNumber = expectMonthlyConsumptionRange.values[contractNumberRowIndex][1];
+          if (!deviceNumber){
+            //console.log("PROCESS MONTH in deviceNumber out: " + processMonth);
+            continue;
+          }
+
+          let expectMonthlyConsumption = expectMonthlyConsumptionRange.values[contractNumberRowIndex][monthColIndex];
+          
+          if (!expectMonthlyConsumption){
+            //console.log("PROCESS MONTH in expectMonthlyConsumption out: " + processMonth);
+
+            continue;
+          };
+
+          consumptions = consumptions.concat(
+            generateConsumptionWA(contractAccount, deviceNumber, expectMonthlyConsumption, processMonth)
+          );
+
+          //console.log("PROCESS MONTH number 3: " + processMonth);
+        }
+      }
+
+      let csvItems = ["Device Number|Contract Account Number|Date From|Date To|Consumption|Consumption Quality"];
+
+      let lastGeneratedDateAsText = formatDate(lastGenDateTZ, "yyyy-MM-dd HH:00");
+      let nowDateAsText = formatDate(nowDateTZ, "yyyy-MM-dd HH:00");
+
+      for (let i = 0; i < consumptions.length; i++) {
+        if (consumptions[i].dateFrom < lastGeneratedDateAsText || consumptions[i].dateFrom >= nowDateAsText) continue;
+        csvItems.push(
+          [
+            consumptions[i].deviceNumber,
+            consumptions[i].contractAccount,
+            consumptions[i].dateFrom,
+            consumptions[i].dateTo,
+            consumptions[i].consumption,
+            consumptions[i].consumptionQuality
+          ].join("|")
+        );
+        // Name of the file to be saved
+      }
+      csvItems.push("TR|" + consumptions.length);
+
+      let timedownl = formatDate(nowDate, "yyyyMMdd_HHmmss")
+      let fileName = `PUBCPBMD_DEV_OUT_${ timedownl }.txt`;
+      let csvContent = csvItems.join("\n");
+      let link = document.createElement("a");
+      link.href = "data:text/csv;charset=utf-8," + encodeURIComponent(csvContent);
+      link.download = fileName;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    }
+
+
+    function generateConsumptionWA(contractAccount, deviceNumber,
+    expectMonthlyConsumption, month) {
+      //console.log(contractAccount + "-" + formatDate(month, "yyyyMM") + "-" + expectMonthlyConsumption);
+
+      var daysInMonth = new Date(month.getFullYear(), month.getMonth() + 1, 0).getDate();
+
+      let totalHours = daysInMonth * 24;
+      let expectHourlyConsumption = expectMonthlyConsumption / totalHours;
+      let sumConsumption = 0;
+      let waveDirect = 1; //1: up, -1: down
+      let waveFrom = -3;
+      let waveTo = 3;
+      let waveIndex = waveFrom;
+      let consumptionData = [];
+      for (let i = 0; i < totalHours; i++) {
+        let consumptionObj = {
+          deviceNumber,
+          contractAccount,
+          dateFrom: formatDate(addHours(new Date(month), i), "yyyy-MM-dd HH:00"),
+          dateTo: formatDate(addHours(new Date(month), i + 1), "yyyy-MM-dd HH:00"),
+          consumption: 0,
+          consumptionQuality: "0"
+        };
+
+        consumptionData.push(consumptionObj);
+
+        if (sumConsumption >= expectMonthlyConsumption) {
+          continue;
+        }
+        if (i == totalHours - 1) {
+          if (expectMonthlyConsumption > sumConsumption) {
+            consumptionObj.consumption = expectMonthlyConsumption - sumConsumption;
+            sumConsumption = expectMonthlyConsumption;
+            continue;
+          }
+        }
+
+        if (waveDirect == 1) {
+          consumptionObj.consumption = expectHourlyConsumption + expectHourlyConsumption * waveIndex * 0.01;
+          waveIndex++;
+        } else if (waveDirect == -1) {
+          consumptionObj.consumption = expectHourlyConsumption + expectHourlyConsumption * waveIndex * 0.01;
+          waveIndex--;
+        }
+
+        if (waveIndex > waveTo) {
+          waveIndex = waveTo;
+          waveDirect = -1;
+        }
+        if (waveIndex < waveFrom) {
+          waveIndex = waveFrom;
+          waveDirect = 1;
+        }
+
+        if (sumConsumption > expectMonthlyConsumption) {
+          consumptionObj.consumption = expectMonthlyConsumption - sumConsumption;
+        }
+
+        sumConsumption += consumptionObj.consumption;
+      }
+
+      return consumptionData;
+    }
+
+
+    function convertTZ(date) {
+      const singaporeDate = new Date(
+        (typeof date === "string" ? new Date(date) : date).toLocaleString("en-US", { timeZone: "Asia/Singapore" })
+      );
+
+      // Set the hours, minutes, and seconds to 0
+      //singaporeDate.setHours(0, 0, 0, 0);
+
+      return singaporeDate;
+    }
+
+
+
+    function addHours(date, hours) {
+      const hoursToAdd = hours * 60 * 60 * 1000;
+      date.setTime(date.getTime() + hoursToAdd);
+      return date;
+    }
+
+
+    //return string
+
+    function formatDate(inputDate, format) {
+      if (!inputDate) return "";
+
+      const padZero = (value) => (value < 10 ? `0${ value }`: `${ value }`);
+      const parts = {
+        yyyy: inputDate.getFullYear(),
+        MM: padZero(inputDate.getMonth() + 1),
+        dd: padZero(inputDate.getDate()),
+        HH: padZero(inputDate.getHours()),
+        hh: padZero(inputDate.getHours() > 12 ? inputDate.getHours() - 12 : inputDate.getHours()),
+        mm: padZero(inputDate.getMinutes()),
+        ss: padZero(inputDate.getSeconds()),
+        tt: inputDate.getHours() < 12 ? "AM" : "PM"
+      };
+
+      return format.replace(/yyyy|MM|dd|HH|hh|mm|ss|tt/g, (match) => parts[match]);
+    }
+
+
+    function monthDiff(before, after) {
+      var months;
+      months = (after.getFullYear() - before.getFullYear()) * 12;
+      months -= before.getMonth();
+      months += after.getMonth();
+      return months <= 0 ? 0 : months;
+    }
+
+
+    /** Default helper for invoking an action and handling errors. */
+
+    async function tryCatch(callback) {
+      try {
+        await callback();
+      } catch (error) {
+        // Note: In a production add-in, you'd want to notify the user through your add-in's UI.
+        console.error(error);
+      }
+    }
+  language: typescript
+template:
+  content: "<section class=\"ms-font-m\">\n\t<p class=\"ms-font-m\">This sample demonstrates basic Excel API calls.</p>\n</section>\n\n<section class=\"samples ms-font-m\">\n\t<h3>Try it out</h3>\n\t<p class=\"ms-font-m\">Select some cells in the worksheet, then press <b>Highlight selected range</b>.</p>\n\t<button id=\"run\" class=\"ms-Button\">\n        <span class=\"ms-Button-label\">Highlight selected range</span>\n    </button>\n</section>"
+  language: html
+style:
+  content: |-
+    section.samples {
+        margin-top: 20px;
+    }
+
+    section.samples .ms-Button, section.setup .ms-Button {
+        display: block;
+        margin-bottom: 5px;
+        margin-left: 20px;
+        min-width: 80px;
+    }
+  language: css
+libraries: |
+  https://appsforoffice.microsoft.com/lib/1/hosted/office.js
+  @types/office-js
+
+  office-ui-fabric-js@1.4.0/dist/css/fabric.min.css
+  office-ui-fabric-js@1.4.0/dist/css/fabric.components.min.css
+
+  core-js@2.4.1/client/core.min.js
+  @types/core-js
+
+  jquery@3.1.1
+  @types/jquery@3.3.1
+
+  https://appsforoffice.microsoft.com/lib/1/hosted/office.js
+  https://appsforoffice.microsoft.com/lib/1/hosted/office.d.ts
+  office-ui-fabric-js@1.4.0/dist/css/fabric.min.css
+      
+  office-ui-fabric-js@1.4.0/dist/css/fabric.components.min.css
+  core-js@2.4.1/client/core.min.js
+  @types/core-js
+  @microsoft/office-js-helpers@0.7.4/dist/office.helpers.min.js
+  @microsoft/office-js-helpers@0.7.4/dist/office.helpers.d.ts
